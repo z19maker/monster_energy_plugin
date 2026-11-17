@@ -1,0 +1,3 @@
+- insert:
+    - id: monster-tracker
+      name: '@local/monster-tracker'
