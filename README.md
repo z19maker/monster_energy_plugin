@@ -14,7 +14,9 @@ Both the command and the tool update the same ledger, so either entry point show
 
 ## The floating can
 
-A small can card floats over the interface, starting at the bottom-left. Drag it anywhere with a mouse, pen, or finger; its position is saved in this browser and restored on reload. Double-click (or press Enter) to reset it to the default corner. When focused, the arrow keys nudge it 10 px and Shift+arrow 40 px.
+A small can card floats over the interface, starting at the bottom-left. Drag it anywhere with a mouse, pen, or finger; its position is saved in this browser and restored on reload. When focused, the arrow keys nudge it 10 px and Shift+arrow 40 px.
+
+Click the card without dragging to open a **last-7-days bar chart**: one bar per local calendar day, today highlighted, with the seven-day total. The popup flips or centres when space is tight, closes on Escape or an outside click, and has a **Reset position** action for the card. Press Enter or Space on the focused card to open the popup.
 
 The card shows a simple inline-SVG energy-drink can, today's count, and the running total. It polls the read-only `GET /monster-tracker/state` route every three seconds and refreshes when the page becomes visible or focused. Zero cans shows a dimmed can. On narrow screens the card stays within the viewport.
 

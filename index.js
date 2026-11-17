@@ -117,10 +117,10 @@ function localDay(date) {
 /**
  * Project the user-facing figures from one ledger.
  * @param {{totalCans: number, entries: {at: string, cans: number}[]}} state ledger.
- * @returns today's count, the account day, and the latest entry time.
+ * @param {Date} now reference instant; tests pass a fixed one.
+ * @returns today's count, the calendar day, and the latest entry time.
  */
-function summaryOf(state) {
-  const now = new Date()
+function summaryOf(state, now = new Date()) {
   const today = localDay(now)
   let todayCans = 0
   for (const entry of state.entries) {
@@ -149,6 +149,28 @@ function summaryLine(summary) {
 function statusText(summary) {
   if (summary.totalCans === 0) return 'No Monster Energy cans logged yet. Use /monster to add one.'
   return `Monster Energy: ${summaryLine(summary)}.`
+}
+
+/**
+ * Bucket the ledger into local calendar days, oldest first.
+ * @param {{entries: {at: string, cans: number}[]}} state ledger.
+ * @param {number} days window size, including today.
+ * @param {Date} now reference instant; tests pass a fixed one.
+ * @returns {{date: string, cans: number}[]} one point per day.
+ */
+function historyOf(state, days = 7, now = new Date()) {
+  const points = []
+  for (let offset = Math.max(1, days) - 1; offset >= 0; offset -= 1) {
+    const date = new Date(now)
+    date.setDate(date.getDate() - offset)
+    points.push({ date: localDay(date), cans: 0 })
+  }
+  const byDate = new Map(points.map(point => [point.date, point]))
+  for (const entry of state.entries) {
+    const point = byDate.get(localDay(new Date(entry.at)))
+    if (point !== undefined) point.cans += entry.cans
+  }
+  return points
 }
 
 /** @param {string} notice @returns {string} a sentence suffix for a one-time recovery notice. */
@@ -199,6 +221,18 @@ class MonsterStore {
   async snapshot() {
     await this.tail
     return summaryOf(await this.load())
+  }
+
+  /**
+   * One committed read for the Web UI: summary and daily buckets from the same state.
+   * @param {number} days window size, including today.
+   * @param {Date} now reference instant; tests pass a fixed one.
+   * @returns {Promise<ReturnType<typeof summaryOf> & {days: {date: string, cans: number}[]}>} committed overview.
+   */
+  async overview(days = 7, now = new Date()) {
+    await this.tail
+    const state = await this.load()
+    return { ...summaryOf(state, now), days: historyOf(state, days, now) }
   }
 
   /** @returns {Promise<ReturnType<typeof summaryOf> & {notice: string}>} committed figures for a status request. */
@@ -377,7 +411,7 @@ export function apply(ctx) {
     ctx.effect(() => webServer.register({
       kind: 'exact',
       path: STATE_ROUTE,
-      resource: async () => Response.json(await store.snapshot(), {
+      resource: async () => Response.json(await store.overview(7), {
         headers: { 'cache-control': 'no-store' },
       }),
     }))

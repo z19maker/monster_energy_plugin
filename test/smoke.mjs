@@ -132,6 +132,48 @@ const files = await readdir(directory)
 assert.ok(files.some(file => file.includes('.corrupt-')), 'corrupt file was preserved')
 third.dispose()
 
+// A fixed multi-day ledger exercises the seven-day buckets, including a
+// multi-can day and an entry eight days old that must be excluded.
+const historyDirectory = await mkdtemp(join(tmpdir(), 'monster-history-'))
+const historyFile = join(historyDirectory, 'state.json')
+const atOffset = (offset) => {
+  const date = new Date()
+  date.setHours(12, 0, 0, 0)
+  date.setDate(date.getDate() - offset)
+  return date.toISOString()
+}
+const localDayOf = (date) => {
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${date.getFullYear()}-${month}-${day}`
+}
+const historyEntries = [
+  { at: atOffset(0), cans: 2 },
+  { at: atOffset(1), cans: 3 },
+  { at: atOffset(3), cans: 1 },
+  { at: atOffset(6), cans: 1 },
+  { at: atOffset(7), cans: 9 },
+]
+await writeFile(historyFile, JSON.stringify({
+  version: 1,
+  totalCans: historyEntries.reduce((sum, entry) => sum + entry.cans, 0),
+  entries: historyEntries,
+}))
+const previousState = process.env.DSH_MONSTER_STATE
+process.env.DSH_MONSTER_STATE = historyFile
+const historyHarness = mount()
+const historyRoute = historyHarness.routes.get('/monster-tracker/state')
+const historyBody = await (await historyRoute.resource(new Request('http://localhost/monster-tracker/state'))).json()
+assert.equal(historyBody.days.length, 7)
+assert.equal(historyBody.days.at(-1).cans, 2, 'today is the last bucket')
+assert.equal(historyBody.days.reduce((sum, day) => sum + day.cans, 0), 7, 'eight days ago is excluded')
+assert.equal(historyBody.days.at(-1).date, localDayOf(new Date()))
+const eightDaysAgo = new Date()
+eightDaysAgo.setDate(eightDaysAgo.getDate() - 7)
+assert.ok(!historyBody.days.some(day => day.date === localDayOf(eightDaysAgo)), 'window is exactly seven days')
+historyHarness.dispose()
+process.env.DSH_MONSTER_STATE = previousState
+
 // The client artifact loads without an image URL, registers its dictionary
 // plus the frame-wide overlay entry, and renders an inline SVG can.
 const clientSource = await readFile(new URL('../client.js', import.meta.url), 'utf8')
@@ -139,7 +181,12 @@ assert.ok(!clientSource.includes('__CAN_DATA_URL__'), 'no unresolved image place
 assert.ok(!clientSource.includes('data:image/png'), 'the card no longer depends on a PNG data URL')
 
 let loaded
-vm.runInNewContext(clientSource, { window: { __ModuleLoader__: { load(entry) { loaded = entry } } } })
+const browserWindow = {
+  innerWidth: 1200,
+  innerHeight: 800,
+  __ModuleLoader__: { load(entry) { loaded = entry } },
+}
+vm.runInNewContext(clientSource, { window: browserWindow })
 assert.equal(loaded.id, '@local/monster-tracker')
 const fakeReact = { createElement(...args) { return { args } }, useState() { return [null, () => {}] }, useEffect() {} }
 const client = loaded.factory(() => fakeReact)
@@ -170,17 +217,19 @@ assert.equal(slotRegistration[0].order, 60)
 assert.equal(slotRegistration[0].locale, 'monsterTracker')
 assert.equal(typeof slotRegistration[1], 'function')
 
-// Exercise the rendered tree with a fake React: one draggable can card with
-// an inline SVG, the today count, total, and unavailable state.
-function renderCan(todayCans, failed = false) {
+// Exercise the rendered tree with a fake React: the draggable card, its inline
+// SVG, and the seven-day popup with seven bars and a total.
+function renderCan(todayCans, failed = false, open = false, days = []) {
   let component
   const states = [
-    failed ? null : { todayCans, totalCans: 9 },
+    failed ? null : { todayCans, totalCans: 9, days },
     failed,
     { x: 10, y: 10 },
     false,
+    open,
   ]
   const renderReact = {
+    Fragment: Symbol('Fragment'),
     createElement(type, props, ...children) {
       if (typeof type === 'function') return type({ ...props, children })
       return { type, props, children }
@@ -201,28 +250,31 @@ function renderCan(todayCans, failed = false) {
   return component({ t: key => key })
 }
 const walkTree = (node) => {
-  if (typeof node === 'string') return { svgs: 0, paths: 0, text: node }
-  if (node === null || node === undefined) return { svgs: 0, paths: 0, text: '' }
+  if (typeof node === 'string') return { svgs: 0, paths: 0, bars: 0, text: node }
+  if (node === null || node === undefined) return { svgs: 0, paths: 0, bars: 0, text: '' }
   if (Array.isArray(node)) {
     return node.reduce((sum, child) => {
       const part = walkTree(child)
       return {
         svgs: sum.svgs + part.svgs,
         paths: sum.paths + part.paths,
+        bars: sum.bars + part.bars,
         text: `${sum.text} ${part.text}`,
       }
-    }, { svgs: 0, paths: 0, text: '' })
+    }, { svgs: 0, paths: 0, bars: 0, text: '' })
   }
   let svgs = node.type === 'svg' ? 1 : 0
   let paths = node.type === 'path' ? 1 : 0
+  let bars = node.props !== undefined && node.props !== null && Object.hasOwn(node.props, 'data-day') ? 1 : 0
   let text = ''
   for (const child of node.children ?? []) {
     const part = walkTree(child)
     svgs += part.svgs
     paths += part.paths
+    bars += part.bars
     text += ` ${part.text}`
   }
-  return { svgs, paths, text }
+  return { svgs, paths, bars, text }
 }
 const three = renderCan(3)
 assert.equal(walkTree(three).svgs, 1, 'the card renders the inline can SVG')
@@ -234,5 +286,59 @@ assert.equal(three.props.style.left, 10)
 assert.equal(three.props.style.top, 10)
 assert.equal(three.props.style.zIndex, 9000)
 assert.match(walkTree(renderCan(0, true)).text, /unavailable/)
+
+const days = [
+  { date: '2026-11-11', cans: 0 },
+  { date: '2026-11-12', cans: 1 },
+  { date: '2026-11-13', cans: 0 },
+  { date: '2026-11-14', cans: 2 },
+  { date: '2026-11-15', cans: 0 },
+  { date: '2026-11-16', cans: 3 },
+  { date: '2026-11-17', cans: 2 },
+]
+globalThis.window = { innerWidth: 1200, innerHeight: 800 }
+const findNode = (node, predicate) => {
+  if (node === null || node === undefined || typeof node === 'string') return undefined
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findNode(child, predicate)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+  if (predicate(node)) return node
+  for (const child of node.children ?? []) {
+    const found = findNode(child, predicate)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+browserWindow.innerWidth = 1200
+browserWindow.innerHeight = 800
+try {
+  const withPopup = renderCan(2, false, true, days)
+  const popupTree = walkTree(withPopup)
+  assert.equal(popupTree.bars, 7, 'the popup renders one bar per day')
+  assert.match(popupTree.text, /last7Days/)
+  assert.match(popupTree.text, /weekTotal: 8/)
+  const dialog = findNode(withPopup, node => node.props?.role === 'dialog')
+  assert.ok(dialog, 'popup dialog is rendered')
+  assert.ok(dialog.props.style.width <= 288)
+} finally {
+  browserWindow.innerWidth = 1200
+  browserWindow.innerHeight = 800
+}
+
+browserWindow.innerWidth = 320
+browserWindow.innerHeight = 640
+try {
+  const narrow = renderCan(2, false, true, days)
+  const dialog = findNode(narrow, node => node.props?.role === 'dialog')
+  assert.ok(dialog, 'narrow popup dialog is rendered')
+  assert.ok(dialog.props.style.width <= 300, 'narrow popup fits the viewport')
+} finally {
+  browserWindow.innerWidth = 1200
+  browserWindow.innerHeight = 800
+}
 
 console.log('smoke: ok')

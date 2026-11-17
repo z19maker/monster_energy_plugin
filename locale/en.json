@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Monster Energy tracker",
-    "description": "Counts cans of Monster Energy you log and shows a draggable can card with today's count and the running total. Drag the can anywhere; double-click to reset its position. Bare /monster adds one can, /monster 2 adds two, /monster status shows totals, and /monster undo removes the last entry; counts persist in monster-tracker.json under your DSH home."
+    "description": "Counts cans of Monster Energy you log and shows a draggable can card with today's count and the running total. Click the can for a seven-day bar chart, or drag it anywhere to move it. Bare /monster adds one can, /monster 2 adds two, /monster status shows totals, and /monster undo removes the last entry; counts persist in monster-tracker.json under your DSH home."
   }
 }
