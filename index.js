@@ -107,11 +107,57 @@ async function saveState(file, state) {
   await rename(temporary, file)
 }
 
-/** @param {{version: number, totalCans: number, entries: {at: string, cans: number}[]}} state @returns {string} local calendar day, `YYYY-MM-DD`. */
-function localDay(date) {
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${date.getFullYear()}-${month}-${day}`
+/** One Intl formatter per requested zone, reused across polls. */
+const zoneFormatters = new Map()
+
+/** @param {string} timeZone IANA zone. @returns {Intl.DateTimeFormat} cached formatter. */
+function zoneFormatter(timeZone) {
+  let formatter = zoneFormatters.get(timeZone)
+  if (formatter === undefined) {
+    formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    })
+    zoneFormatters.set(timeZone, formatter)
+  }
+  return formatter
+}
+
+/** @param {string | null} value requested zone. @returns {string | undefined} a valid IANA zone. */
+function validTimeZone(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 64) return undefined
+  try {
+    zoneFormatter(value)
+    return value
+  } catch (error) {
+    return undefined
+  }
+}
+
+/** @param {Date} date @param {string | undefined} timeZone @returns {{year: number, month: number, day: number}} civil parts. */
+function civilDate(date, timeZone) {
+  if (timeZone === undefined) {
+    return { year: date.getFullYear(), month: date.getMonth() + 1, day: date.getDate() }
+  }
+  const values = {}
+  for (const part of zoneFormatter(timeZone).formatToParts(date)) values[part.type] = part.value
+  return { year: Number(values.year), month: Number(values.month), day: Number(values.day) }
+}
+
+/** @param {Date} date @param {string | undefined} timeZone @returns {string} `YYYY-MM-DD` in the requested zone. */
+function zoneDay(date, timeZone) {
+  const { year, month, day } = civilDate(date, timeZone)
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+/** @param {Date} now @param {number} offset @param {string | undefined} timeZone @returns {string} a civil day key offset within the zone. */
+function zoneDayOffset(now, offset, timeZone) {
+  const { year, month, day } = civilDate(now, timeZone)
+  const shifted = new Date(Date.UTC(year, month - 1, day))
+  shifted.setUTCDate(shifted.getUTCDate() - offset)
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-${String(shifted.getUTCDate()).padStart(2, '0')}`
 }
 
 /**
@@ -120,11 +166,11 @@ function localDay(date) {
  * @param {Date} now reference instant; tests pass a fixed one.
  * @returns today's count, the calendar day, and the latest entry time.
  */
-function summaryOf(state, now = new Date()) {
-  const today = localDay(now)
+function summaryOf(state, now = new Date(), timeZone = undefined) {
+  const today = zoneDay(now, timeZone)
   let todayCans = 0
   for (const entry of state.entries) {
-    if (localDay(new Date(entry.at)) === today) todayCans += entry.cans
+    if (zoneDay(new Date(entry.at), timeZone) === today) todayCans += entry.cans
   }
   const last = state.entries.at(-1)
   return {
@@ -158,16 +204,14 @@ function statusText(summary) {
  * @param {Date} now reference instant; tests pass a fixed one.
  * @returns {{date: string, cans: number}[]} one point per day.
  */
-function historyOf(state, days = 7, now = new Date()) {
+function historyOf(state, days = 7, now = new Date(), timeZone = undefined) {
   const points = []
   for (let offset = Math.max(1, days) - 1; offset >= 0; offset -= 1) {
-    const date = new Date(now)
-    date.setDate(date.getDate() - offset)
-    points.push({ date: localDay(date), cans: 0 })
+    points.push({ date: zoneDayOffset(now, offset, timeZone), cans: 0 })
   }
   const byDate = new Map(points.map(point => [point.date, point]))
   for (const entry of state.entries) {
-    const point = byDate.get(localDay(new Date(entry.at)))
+    const point = byDate.get(zoneDay(new Date(entry.at), timeZone))
     if (point !== undefined) point.cans += entry.cans
   }
   return points
@@ -192,6 +236,8 @@ class MonsterStore {
     this.loading = undefined
     /** Recovery notice waiting for the next result. */
     this.pendingNotice = ''
+    /** Browser zone requested by the Web UI; survives for this process only. */
+    this.timeZone = undefined
     /** Tail of the write chain; never rejects. */
     this.tail = Promise.resolve()
   }
@@ -220,19 +266,24 @@ class MonsterStore {
   /** @returns {Promise<ReturnType<typeof summaryOf>>} committed figures without consuming a notice. */
   async snapshot() {
     await this.tail
-    return summaryOf(await this.load())
+    return summaryOf(await this.load(), new Date(), this.timeZone)
   }
 
   /**
    * One committed read for the Web UI: summary and daily buckets from the same state.
+   * The requested zone also becomes the process default, so tool and command
+   * status agree with the card after the page has polled once.
    * @param {number} days window size, including today.
    * @param {Date} now reference instant; tests pass a fixed one.
+   * @param {string | undefined} timeZone validated IANA zone from the browser.
    * @returns {Promise<ReturnType<typeof summaryOf> & {days: {date: string, cans: number}[]}>} committed overview.
    */
-  async overview(days = 7, now = new Date()) {
+  async overview(days = 7, now = new Date(), timeZone = undefined) {
+    if (timeZone !== undefined) this.timeZone = timeZone
+    const zone = timeZone ?? this.timeZone
     await this.tail
     const state = await this.load()
-    return { ...summaryOf(state, now), days: historyOf(state, days, now) }
+    return { ...summaryOf(state, now, zone), days: historyOf(state, days, now, zone) }
   }
 
   /** @returns {Promise<ReturnType<typeof summaryOf> & {notice: string}>} committed figures for a status request. */
@@ -404,16 +455,21 @@ export function apply(ctx) {
   const store = new MonsterStore(resolveStatePath())
   ctx.effect(() => ctx.tools.register(toolDefinition(store)))
   ctx.effect(() => ctx.commands.register(commandDefinition(store)))
-  // The Web UI (client.js) polls this read-only route. Routes default to the
-  // web server's authenticated-peer admission, so only the signed-in page reads it.
-  const webServer = ctx.get('webServer')
-  if (webServer !== undefined) {
-    ctx.effect(() => webServer.register({
+  // The Web UI (client.js) polls this read-only route. Resolve webServer through
+  // ctx.inject rather than ctx.get: during profile boot the service can mount
+  // after this plugin's apply(), and a one-time get would leave the route 404.
+  // Routes default to the web server's authenticated-peer admission, so only
+  // the signed-in page can read it.
+  ctx.inject(['webServer'], (scope) => {
+    scope.effect(() => scope.webServer.register({
       kind: 'exact',
       path: STATE_ROUTE,
-      resource: async () => Response.json(await store.overview(7), {
-        headers: { 'cache-control': 'no-store' },
-      }),
+      resource: async (request) => {
+        const requested = request === undefined ? null : new URL(request.url).searchParams.get('tz')
+        return Response.json(await store.overview(7, new Date(), validTimeZone(requested)), {
+          headers: { 'cache-control': 'no-store' },
+        })
+      },
     }))
-  }
+  })
 }

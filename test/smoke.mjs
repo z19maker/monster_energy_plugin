@@ -9,23 +9,39 @@ const directory = await mkdtemp(join(tmpdir(), 'monster-tracker-'))
 process.env.DSH_MONSTER_STATE = join(directory, 'state.json')
 
 /** Minimal host context: the registries and the optional Web route table. */
-function createContext({ web = true } = {}) {
+function createContext({ web = true, deferWeb = false } = {}) {
   const tools = new Map()
   const commands = new Map()
   const routes = new Map()
   const disposers = []
+  const pendingWeb = []
   const webServer = {
     register(route) {
       routes.set(route.path, route)
       return () => routes.delete(route.path)
     },
   }
-  const ctx = {
-    get(name) { return name === 'webServer' && web ? webServer : undefined },
+  const scope = {
+    webServer,
     effect(callback) {
       const dispose = callback()
       disposers.push(dispose)
       return dispose
+    },
+  }
+  const ctx = {
+    effect(callback) {
+      const dispose = callback()
+      disposers.push(dispose)
+      return dispose
+    },
+    inject(dependencies, callback) {
+      if (!dependencies.includes('webServer') || !web) return
+      if (deferWeb) {
+        pendingWeb.push(callback)
+        return
+      }
+      callback(scope)
     },
     tools: { register(definition) { tools.set(definition.name, definition); return () => tools.delete(definition.name) } },
     commands: { register(definition) { commands.set(definition.name, definition); return () => commands.delete(definition.name) } },
@@ -35,6 +51,7 @@ function createContext({ web = true } = {}) {
     tools,
     commands,
     routes,
+    provideWebServer() { for (const callback of pendingWeb.splice(0)) callback(scope) },
     dispose() { for (const dispose of disposers.reverse()) dispose?.() },
   }
 }
@@ -44,6 +61,13 @@ function mount(options) {
   apply(harness.ctx)
   return harness
 }
+
+// Registration must also work when the web server mounts after apply().
+const deferred = mount({ deferWeb: true })
+assert.equal(deferred.routes.size, 0, 'route waits for the web server')
+deferred.provideWebServer()
+assert.ok(deferred.routes.get('/monster-tracker/state'), 'route registers when the web server arrives')
+deferred.dispose()
 
 const first = mount()
 const tool = first.tools.get('monster_energy')
@@ -168,6 +192,19 @@ assert.equal(historyBody.days.length, 7)
 assert.equal(historyBody.days.at(-1).cans, 2, 'today is the last bucket')
 assert.equal(historyBody.days.reduce((sum, day) => sum + day.cans, 0), 7, 'eight days ago is excluded')
 assert.equal(historyBody.days.at(-1).date, localDayOf(new Date()))
+
+// A browser zone overrides the host's local day while keeping seven buckets.
+const zone = 'America/New_York'
+const zonedBody = await (await historyRoute.resource(new Request(
+  `http://localhost/monster-tracker/state?tz=${encodeURIComponent(zone)}`,
+))).json()
+const zoneParts = new Intl.DateTimeFormat('en-US', {
+  timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+}).formatToParts(new Date())
+const zoneValues = Object.fromEntries(zoneParts.map(part => [part.type, part.value]))
+const zoneToday = `${zoneValues.year}-${zoneValues.month}-${zoneValues.day}`
+assert.equal(zonedBody.today, zoneToday, 'today follows the requested zone')
+assert.equal(zonedBody.days.at(-1).date, zoneToday)
 const eightDaysAgo = new Date()
 eightDaysAgo.setDate(eightDaysAgo.getDate() - 7)
 assert.ok(!historyBody.days.some(day => day.date === localDayOf(eightDaysAgo)), 'window is exactly seven days')
@@ -179,6 +216,7 @@ process.env.DSH_MONSTER_STATE = previousState
 const clientSource = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 assert.ok(!clientSource.includes('__CAN_DATA_URL__'), 'no unresolved image placeholder')
 assert.ok(!clientSource.includes('data:image/png'), 'the card no longer depends on a PNG data URL')
+assert.ok(clientSource.includes('?tz='), 'the client sends its time zone')
 
 let loaded
 const browserWindow = {

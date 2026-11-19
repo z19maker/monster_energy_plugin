@@ -1,6 +1,6 @@
 {
   "name": "@local/monster-tracker",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "type": "module",
   "description": "Tracks how many cans of Monster Energy you have consumed, with a live can strip in the Web UI.",

@@ -17,6 +17,12 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const NS = 'monsterTracker'
     const POSITION_KEY = 'dsh.monster-tracker.float.v1'
+    const TIME_ZONE = (() => {
+      try { return Intl.DateTimeFormat().resolvedOptions().timeZone ?? '' } catch (error) { return '' }
+    })()
+    const STATE_URL = TIME_ZONE === ''
+      ? '/monster-tracker/state'
+      : `/monster-tracker/state?tz=${encodeURIComponent(TIME_ZONE)}`
     const CARD_WIDTH = 116
     const CARD_HEIGHT = 180
     const POPUP_MAX_WIDTH = 288
@@ -162,7 +168,7 @@ window.__ModuleLoader__.load({
           controller?.abort()
           controller = new AbortController()
           try {
-            const response = await fetch('/monster-tracker/state', {
+            const response = await fetch(STATE_URL, {
               cache: 'no-store',
               credentials: 'same-origin',
               signal: controller.signal,

@@ -22,6 +22,10 @@ The card shows a simple inline-SVG energy-drink can, today's count, and the runn
 
 The card is a Web Client plugin; after changing [client.js](client.js), refresh the page. The can is drawn inline as SVG, so it needs no image file, asset route, or build step.
 
+### Time zone
+
+The card sends the browser's IANA time zone with each poll. Today's count and the seven-day chart use that zone; the agent tool and `/monster` follow the last zone the page requested, falling back to the Host's local zone before the page first polls. A Host restart resets that fallback until the page polls again.
+
 ## Where the data lives
 
 The ledger is `$DSH_HOME/monster-tracker.json` (by default `~/.dsh/monster-tracker.json`). It is a small JSON file that survives restarts, plugin removal, and DSH upgrades. Deletes only happen when you use `undo` or delete the file yourself. Today's count uses the host's local time zone.
